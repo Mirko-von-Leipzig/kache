@@ -5905,8 +5905,6 @@ fn tool_version_cache_write_is_read_back() {
 fn cwd_remap_probe_kills_timeouts_and_retries_without_a_cached_rejection() {
     let _lock = key_test_lock();
     let dir = tempfile::tempdir().unwrap();
-    let _cache =
-        crate::config::tests::set_env_for_test("KACHE_CACHE_DIR", Some(dir.path().as_os_str()));
     let rustc = dir.path().join("rustc-probe");
     kache_fs::testutil::write_executable(
         &rustc,
@@ -5930,10 +5928,30 @@ fn cwd_remap_probe_kills_timeouts_and_retries_without_a_cached_rejection() {
         rustc_accepts_cwd_remap(&rustc, "fixture", "/src", None, false),
         Some(true)
     );
-    assert_eq!(
-        rustc_accepts_cwd_remap(&rustc, "fixture", "/src", None, false),
-        Some(true)
-    );
+    assert_eq!(std::fs::read(rustc.with_extension("calls")).unwrap(), b"x");
+}
+
+#[cfg(unix)]
+#[test]
+fn cwd_remap_probe_memoizes_success_when_the_cache_is_writable() {
+    let _lock = key_test_lock();
+    let cache_dir = crate::config::default_cache_dir();
+    if std::fs::create_dir_all(&cache_dir).is_err() || tempfile::tempfile_in(&cache_dir).is_err() {
+        eprintln!(
+            "skipping memoization check: {} is not writable",
+            cache_dir.display()
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rustc = dir.path().join("rustc-probe");
+    kache_fs::testutil::write_executable(&rustc, "#!/bin/sh\nprintf x >> \"$0.calls\"\n");
+    for _ in 0..2 {
+        assert_eq!(
+            rustc_accepts_cwd_remap(&rustc, "fixture", "/src", None, false),
+            Some(true)
+        );
+    }
     assert_eq!(std::fs::read(rustc.with_extension("calls")).unwrap(), b"x");
 }
 
