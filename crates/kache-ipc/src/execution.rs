@@ -639,6 +639,11 @@ mod windows_tests {
         .unwrap();
         let probe: crate::SyncStream =
             interprocess::os::windows::named_pipe::local_socket::Stream::from(pipe).into();
+        while !root.path().join("accepted").exists() {
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(probe.credentials().unwrap().same_user);
         assert_eq!(
             probe.credentials().unwrap().pid.unwrap().get(),
@@ -654,6 +659,7 @@ mod windows_tests {
             "{error:#}"
         );
         assert_eq!(try_execute(&socket, &request(root.path())).unwrap(), None);
+        std::fs::write(root.path().join("done"), b"done").unwrap();
         while child.0.try_wait().unwrap().is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -667,10 +673,12 @@ mod windows_tests {
             stderr.read_to_string(&mut diagnostics).unwrap();
         }
         assert!(status.success(), "{diagnostics}");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("received")).unwrap(),
-            "0,0,0"
+        let received = std::fs::read_to_string(root.path().join("received")).unwrap();
+        assert!(
+            !received.is_empty(),
+            "the credential probe must reach the server"
         );
+        assert!(received.split(',').all(|count| count == "0"), "{received}");
     }
 
     #[test]
@@ -746,9 +754,25 @@ mod windows_tests {
             .unwrap();
         std::fs::write(root.join("ready"), b"ready").unwrap();
         let mut received = Vec::new();
-        for _ in 0..3 {
+        let limit = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            // The listener can discard a client that closes before accept.
+            // Count observed bytes, rather than requiring every rejected
+            // connection to survive long enough to be accepted in user space.
+            let stream = match listener.accept() {
+                Ok(stream) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if root.join("done").exists() {
+                        break;
+                    }
+                    assert!(std::time::Instant::now() < limit);
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => panic!("accepting the credential probe: {error}"),
+            };
+            std::fs::write(root.join("accepted"), b"accepted").unwrap();
             let deadline = std::time::Instant::now() + PREPARE_TIMEOUT;
-            let stream = retry_until(Some(deadline), || listener.accept()).unwrap();
             let mut byte = [0u8; 1];
             let count = retry_until(Some(deadline), || (&stream).read(&mut byte))
                 .or_else(|error| {
