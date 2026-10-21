@@ -12,7 +12,7 @@ jobs:
       - name: Inspect documented token records
         shell: pwsh
         run: |
-          Add-Type @'
+          $source = @'
           using System;
           using System.ComponentModel;
           using System.Runtime.InteropServices;
@@ -28,6 +28,8 @@ jobs:
               public uint MandatoryPolicy, Flags, AppContainerNumber;
               public IntPtr PackageSid, CapabilitiesHash, TrustLevelSid, SecurityAttributes;
             }
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr token,uint access,IntPtr attributes,int level,int type,out IntPtr duplicate);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr token,uint flags,uint disable,IntPtr sids,uint delete,IntPtr privileges,uint restrict,IntPtr restricted,out IntPtr result);
             static void Read(IntPtr token, int cls) {
               int length;
               GetTokenInformation(token, cls, IntPtr.Zero, 0, out length);
@@ -36,6 +38,7 @@ jobs:
                 if (!GetTokenInformation(token,cls,p,length,out length)) throw new Win32Exception();
                 Console.Write("class="+cls+" length="+length+" first="+Marshal.ReadInt32(p));
                 if (cls==33 || cls==34) Console.Write(" attribute_count="+Marshal.ReadInt32(p,4));
+                if (cls==10) Console.Write(" token_id="+Marshal.ReadInt64(p)+" modified_id="+Marshal.ReadInt64(p,48));
                 if (cls==22) {
                   Access a=Marshal.PtrToStructure<Access>(p);
                   Console.Write(" type="+a.TokenType+" flags="+a.Flags+" opaque_attributes="+(a.SecurityAttributes!=IntPtr.Zero)+" trust_sid="+(a.TrustLevelSid!=IntPtr.Zero));
@@ -46,9 +49,24 @@ jobs:
             public static void Run() {
               IntPtr token;
               if (!OpenProcessToken(GetCurrentProcess(),0xA,out token)) throw new Win32Exception();
-              try { foreach (int cls in new [] {29,33,34,30,22,18,19,12,26,21,23,24,27,10,1,4,5,25,2,11,37,3,6}) Read(token,cls); }
+              try {
+                foreach (int cls in new [] {29,33,34,30,22,18,20,12,26,21,23,24,27,10,1,4,5,25,2,11,37,3,6}) Read(token,cls);
+                IntPtr duplicate;
+                if (!DuplicateTokenEx(token,0xA,IntPtr.Zero,2,1,out duplicate)) throw new Win32Exception();
+                try { Console.Write("duplicate "); Read(duplicate,10); } finally { CloseHandle(duplicate); }
+                IntPtr restricted;
+                if (!CreateRestrictedToken(token,1,0,IntPtr.Zero,0,IntPtr.Zero,0,IntPtr.Zero,out restricted)) throw new Win32Exception();
+                try { Console.Write("restricted "); Read(restricted,10); } finally { CloseHandle(restricted); }
+              }
               finally { CloseHandle(token); }
             }
           }
           '@
+          $env:PROBE_SOURCE = Join-Path $env:RUNNER_TEMP 'token-probe.cs'
+          Set-Content -Path $env:PROBE_SOURCE -Value $source
+          Add-Type -Path $env:PROBE_SOURCE
+          'Parent context'
           [TokenProbe]::Run()
+          'Child context'
+          & (Get-Process -Id $PID).Path -NoProfile -Command 'Add-Type -Path $env:PROBE_SOURCE; [TokenProbe]::Run()'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
