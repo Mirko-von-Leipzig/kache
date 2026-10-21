@@ -1,0 +1,54 @@
+name: Windows token context probe
+on:
+  push:
+    branches: [fix/shim-daemon-ci]
+permissions:
+  contents: read
+jobs:
+  token-context:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect documented token records
+        shell: pwsh
+        run: |
+          Add-Type @'
+          using System;
+          using System.ComponentModel;
+          using System.Runtime.InteropServices;
+          public class TokenProbe {
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p, uint access, out IntPtr token);
+            [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+            [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr t, int c, IntPtr b, int n, out int length);
+            [StructLayout(LayoutKind.Sequential)] struct Access {
+              public IntPtr SidHash, RestrictedSidHash, Privileges;
+              public long AuthenticationId;
+              public int TokenType, ImpersonationLevel;
+              public uint MandatoryPolicy, Flags, AppContainerNumber;
+              public IntPtr PackageSid, CapabilitiesHash, TrustLevelSid, SecurityAttributes;
+            }
+            static void Read(IntPtr token, int cls) {
+              int length;
+              GetTokenInformation(token, cls, IntPtr.Zero, 0, out length);
+              IntPtr p=Marshal.AllocHGlobal(length);
+              try {
+                if (!GetTokenInformation(token,cls,p,length,out length)) throw new Win32Exception();
+                Console.Write("class="+cls+" length="+length+" first="+Marshal.ReadInt32(p));
+                if (cls==33 || cls==34) Console.Write(" attribute_count="+Marshal.ReadInt32(p,4));
+                if (cls==22) {
+                  Access a=Marshal.PtrToStructure<Access>(p);
+                  Console.Write(" type="+a.TokenType+" flags="+a.Flags+" opaque_attributes="+(a.SecurityAttributes!=IntPtr.Zero)+" trust_sid="+(a.TrustLevelSid!=IntPtr.Zero));
+                }
+                Console.WriteLine();
+              } finally { Marshal.FreeHGlobal(p); }
+            }
+            public static void Run() {
+              IntPtr token;
+              if (!OpenProcessToken(GetCurrentProcess(),0xA,out token)) throw new Win32Exception();
+              try { foreach (int cls in new [] {29,33,34,30,22,18,19,12,26,21,23,24,27,10,1,4,5,25,2,11,37,3,6}) Read(token,cls); }
+              finally { CloseHandle(token); }
+            }
+          }
+          '@
+          [TokenProbe]::Run()
