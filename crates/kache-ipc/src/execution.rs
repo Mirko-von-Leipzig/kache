@@ -661,7 +661,20 @@ mod windows_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(child.0.wait().unwrap().success());
+        let status = child.0.wait().unwrap();
+        let mut stderr = Vec::new();
+        child
+            .0
+            .stderr
+            .as_mut()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        assert!(
+            status.success(),
+            "weaker pipe fixture failed: {status}: {}",
+            String::from_utf8_lossy(&stderr),
+        );
         assert_eq!(
             std::fs::read_to_string(root.path().join("received")).unwrap(),
             "0,0,0"

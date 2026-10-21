@@ -256,13 +256,46 @@ mod tests {
             .unwrap()
             == 0
         {
-            assert!(equivalent(token.as_raw_handle(), token.as_raw_handle()).unwrap());
+            let access = Information::read(token.as_raw_handle(), TokenAccessInformation)
+                .unwrap()
+                .value::<TOKEN_ACCESS_INFORMATION>()
+                .unwrap();
+            let claims = [TokenUserClaimAttributes, TokenDeviceClaimAttributes].map(|class| {
+                Information::read(token.as_raw_handle(), class)
+                    .unwrap()
+                    .array::<u32>(4, 1)
+                    .unwrap()[0]
+            });
+            let capabilities = Information::read(token.as_raw_handle(), TokenCapabilities)
+                .unwrap()
+                .value::<u32>()
+                .unwrap();
+            assert!(
+                equivalent(token.as_raw_handle(), token.as_raw_handle()).unwrap(),
+                "same-token context rejected: claims={claims:?}, capabilities={capabilities}, opaque_attributes={}, type={}, flags={}",
+                !access.SecurityAttributes.is_null(),
+                access.TokenType,
+                access.Flags,
+            );
         }
     }
 
     #[test]
     fn deleting_privileges_cannot_use_an_unrestricted_daemon() {
-        let token = token(unsafe { GetCurrentProcess() }).unwrap();
+        let mut token = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    &mut token,
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error(),
+        );
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
         let mut restricted = std::ptr::null_mut();
         assert_ne!(
             unsafe {
@@ -278,7 +311,9 @@ mod tests {
                     &mut restricted,
                 )
             },
-            0
+            0,
+            "{}",
+            io::Error::last_os_error(),
         );
         let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
         assert!(!equivalent(restricted.as_raw_handle(), token.as_raw_handle()).unwrap());
