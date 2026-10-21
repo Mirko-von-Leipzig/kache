@@ -110,6 +110,8 @@ impl Connection {
                     }
                 })
         })?;
+        #[cfg(test)]
+        eprintln!("execution pipe: opened client handle");
         let pipe = DuplexPipeStream::<Bytes>::try_from(handle).map_err(io::Error::from)?;
         let inner = interprocess::os::windows::named_pipe::local_socket::Stream::from(pipe);
         Self::from_stream(inner.into(), deadline)
@@ -119,7 +121,11 @@ impl Connection {
         inner: crate::SyncStream,
         deadline: std::time::Instant,
     ) -> Result<Self> {
+        #[cfg(test)]
+        eprintln!("execution pipe: checking peer");
         let peer = PeerSecurity::open(&inner)?;
+        #[cfg(test)]
+        eprintln!("execution pipe: admitted peer");
         inner.set_nonblocking(true)?;
         Ok(Self {
             inner,
@@ -172,6 +178,8 @@ impl Read for &Connection {
             }
             // One reader owns the stream; queued bytes cannot disappear
             // between the peek and this bounded read.
+            #[cfg(test)]
+            eprintln!("execution pipe: read available={available}");
             let count = bytes.len().min(available as usize);
             (&self.inner).read(&mut bytes[..count])
         })
@@ -180,6 +188,8 @@ impl Read for &Connection {
 
 impl Write for &Connection {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        #[cfg(test)]
+        eprintln!("execution pipe: writing {} bytes", bytes.len());
         retry_until(self.deadline.get(), || match (&self.inner).write(bytes) {
             // PIPE_NOWAIT may successfully write zero bytes when full.
             Ok(0) if !bytes.is_empty() => Err(std::io::ErrorKind::WouldBlock.into()),

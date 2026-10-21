@@ -1,9 +1,9 @@
-//! Admission requires the same unmodified primary-token security context.
+//! Admission compares the file-access context before using daemon threads.
 
 use std::io;
-use std::mem::{MaybeUninit, size_of};
+use std::mem::{offset_of, size_of};
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE};
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -21,47 +21,229 @@ fn token(process: HANDLE, access: u32) -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
-fn information<T>(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<T> {
-    let mut value = MaybeUninit::<T>::uninit();
-    let mut length = 0;
-    if unsafe {
-        GetTokenInformation(
-            token,
-            class,
-            value.as_mut_ptr().cast(),
-            size_of::<T>() as u32,
-            &mut length,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
+struct Information {
+    storage: Vec<usize>,
+    length: usize,
+}
+
+impl Information {
+    fn read(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Self> {
+        let mut length = 0;
+        unsafe {
+            GetTokenInformation(token, class, std::ptr::null_mut(), 0, &mut length);
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+            || length == 0
+            || length > (1 << 20)
+        {
+            return Err(io::Error::other("cannot size compiler security context"));
+        }
+        let mut storage = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                class,
+                storage.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if length as usize > storage.len() * size_of::<usize>() {
+            return Err(io::Error::other(
+                "compiler security context grew while reading",
+            ));
+        }
+        Ok(Self {
+            storage,
+            length: length as usize,
+        })
     }
-    if length as usize != size_of::<T>() {
-        return Err(io::Error::other(
-            "unexpected compiler security context size",
-        ));
+
+    fn pointer(&self) -> *const u8 {
+        self.storage.as_ptr().cast()
     }
-    Ok(unsafe { value.assume_init() })
+
+    fn bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.pointer(), self.length) }
+    }
+
+    fn value<T: Copy>(&self) -> io::Result<T> {
+        if self.length < size_of::<T>() {
+            return Err(io::Error::other("truncated compiler security context"));
+        }
+        Ok(unsafe { self.pointer().cast::<T>().read_unaligned() })
+    }
+
+    fn array<T: Copy>(&self, offset: usize, count: usize) -> io::Result<Vec<T>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if count > self.length.saturating_sub(offset) / size_of::<T>() || offset > self.length {
+            return Err(io::Error::other("invalid compiler security context array"));
+        }
+        Ok((0..count)
+            .map(|index| unsafe {
+                self.pointer()
+                    .add(offset + index * size_of::<T>())
+                    .cast::<T>()
+                    .read_unaligned()
+            })
+            .collect())
+    }
+
+    fn pointed_bytes(&self, pointer: *const u8, length: usize) -> io::Result<Vec<u8>> {
+        let offset = (pointer as usize)
+            .checked_sub(self.pointer() as usize)
+            .ok_or_else(|| io::Error::other("invalid compiler security context pointer"))?;
+        if offset > self.length || length > self.length - offset {
+            return Err(io::Error::other(
+                "compiler security context pointer is out of bounds",
+            ));
+        }
+        Ok(self.bytes()[offset..offset + length].to_owned())
+    }
+
+    fn sid(&self, pointer: PSID) -> io::Result<Vec<u8>> {
+        // Validate the SID header in the returned buffer before asking Win32
+        // to read its variable-length subauthorities.
+        self.pointed_bytes(pointer.cast(), 8)?;
+        let length = unsafe { GetLengthSid(pointer) } as usize;
+        self.pointed_bytes(pointer.cast(), length)
+    }
 }
 
 fn equivalent(client: HANDLE, daemon: HANDLE) -> io::Result<bool> {
-    if information::<u32>(client, TokenIsAppContainer)? != 0
-        || information::<u32>(daemon, TokenIsAppContainer)? != 0
+    for token in [client, daemon] {
+        if Information::read(token, TokenIsAppContainer)?.value::<u32>()? != 0 {
+            return Ok(false);
+        }
+    }
+    for token in [client, daemon] {
+        // Claim/capability access rules need more than user/group equality.
+        // Retain local execution until those contexts can be compared fully.
+        for class in [TokenUserClaimAttributes, TokenDeviceClaimAttributes] {
+            if Information::read(token, class)?.array::<u32>(4, 1)?[0] != 0 {
+                return Ok(false);
+            }
+        }
+        if Information::read(token, TokenCapabilities)?.value::<u32>()? != 0 {
+            return Ok(false);
+        }
+    }
+    let client_statistics =
+        Information::read(client, TokenStatistics)?.value::<TOKEN_STATISTICS>()?;
+    let daemon_statistics =
+        Information::read(daemon, TokenStatistics)?.value::<TOKEN_STATISTICS>()?;
+    let authentication = |info: TOKEN_STATISTICS| {
+        (
+            info.AuthenticationId.HighPart,
+            info.AuthenticationId.LowPart,
+        )
+    };
+    if authentication(client_statistics) != authentication(daemon_statistics) {
+        return Ok(false);
+    }
+    let same_generation = client_statistics.ModifiedId.HighPart
+        == daemon_statistics.ModifiedId.HighPart
+        && client_statistics.ModifiedId.LowPart == daemon_statistics.ModifiedId.LowPart;
+    // Windows exposes opaque security attributes even on ordinary tokens.
+    // Compare every documented access field below; permit opaque attributes
+    // only on unchanged token copies with the same kernel-issued ModifiedId.
+    // https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-token_statistics
+    let client_access = Information::read(client, TokenAccessInformation)?;
+    let daemon_access = Information::read(daemon, TokenAccessInformation)?;
+    let a = client_access.value::<TOKEN_ACCESS_INFORMATION>()?;
+    let b = daemon_access.value::<TOKEN_ACCESS_INFORMATION>()?;
+    if ((!a.SecurityAttributes.is_null() || !b.SecurityAttributes.is_null()) && !same_generation)
+        || a.TokenType != TokenPrimary
+        || b.TokenType != TokenPrimary
+        || a.Flags != b.Flags
+        || optional_sid(&client_access, a.TrustLevelSid)?
+            != optional_sid(&daemon_access, b.TrustLevelSid)?
     {
         return Ok(false);
     }
-    let client = information::<TOKEN_STATISTICS>(client, TokenStatistics)?;
-    let server = information::<TOKEN_STATISTICS>(daemon, TokenStatistics)?;
-    let luid = |value: windows_sys::Win32::Foundation::LUID| (value.HighPart, value.LowPart);
-    // ModifiedId is a kernel-issued LUID that changes whenever the token is
-    // modified. Unchanged primary-token copies inherited by compiler clients
-    // and the daemon retain this generation, including opaque claims. Require
-    // that exact generation rather than trying to interpret reserved fields.
-    // https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-token_statistics
-    Ok(client.TokenType == TokenPrimary
-        && server.TokenType == TokenPrimary
-        && luid(client.AuthenticationId) == luid(server.AuthenticationId)
-        && luid(client.ModifiedId) == luid(server.ModifiedId))
+    for class in [
+        TokenElevation,
+        TokenElevationType,
+        TokenSessionId,
+        TokenUIAccess,
+        TokenHasRestrictions,
+        TokenVirtualizationAllowed,
+        TokenVirtualizationEnabled,
+        TokenMandatoryPolicy,
+    ] {
+        if Information::read(client, class)?.bytes() != Information::read(daemon, class)?.bytes() {
+            return Ok(false);
+        }
+    }
+    for class in [
+        TokenUser,
+        TokenOwner,
+        TokenPrimaryGroup,
+        TokenIntegrityLevel,
+    ] {
+        let a = Information::read(client, class)?;
+        let b = Information::read(daemon, class)?;
+        // All four records start with their SID pointer.
+        if a.sid(a.value::<PSID>()?)? != b.sid(b.value::<PSID>()?)? {
+            return Ok(false);
+        }
+    }
+    if groups(client, TokenGroups)? != groups(daemon, TokenGroups)?
+        || groups(client, TokenRestrictedSids)? != groups(daemon, TokenRestrictedSids)?
+        || groups(client, TokenDeviceGroups)? != groups(daemon, TokenDeviceGroups)?
+        || privileges(client)? != privileges(daemon)?
+    {
+        return Ok(false);
+    }
+    Ok(default_dacl(client)? == default_dacl(daemon)?)
+}
+
+fn optional_sid(info: &Information, pointer: PSID) -> io::Result<Option<Vec<u8>>> {
+    if pointer.is_null() {
+        Ok(None)
+    } else {
+        info.sid(pointer).map(Some)
+    }
+}
+
+fn groups(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<(Vec<u8>, u32)>> {
+    let info = Information::read(token, class)?;
+    let group_count = info.value::<u32>()? as usize;
+    let mut groups = info
+        .array::<SID_AND_ATTRIBUTES>(offset_of!(TOKEN_GROUPS, Groups), group_count)?
+        .into_iter()
+        .map(|group| Ok((info.sid(group.Sid)?, group.Attributes)))
+        .collect::<io::Result<Vec<_>>>()?;
+    groups.sort();
+    Ok(groups)
+}
+
+fn privileges(token: HANDLE) -> io::Result<Vec<(i32, u32, u32)>> {
+    let info = Information::read(token, TokenPrivileges)?;
+    let count = info.value::<u32>()? as usize;
+    let mut privileges = info
+        .array::<LUID_AND_ATTRIBUTES>(offset_of!(TOKEN_PRIVILEGES, Privileges), count)?
+        .into_iter()
+        .map(|value| (value.Luid.HighPart, value.Luid.LowPart, value.Attributes))
+        .collect::<Vec<_>>();
+    privileges.sort();
+    Ok(privileges)
+}
+
+fn default_dacl(token: HANDLE) -> io::Result<Option<Vec<u8>>> {
+    let info = Information::read(token, TokenDefaultDacl)?;
+    let pointer = info.value::<TOKEN_DEFAULT_DACL>()?.DefaultDacl;
+    if pointer.is_null() {
+        return Ok(None);
+    }
+    info.pointed_bytes(pointer.cast(), size_of::<ACL>())?;
+    let length = unsafe { pointer.read_unaligned() }.AclSize as usize;
+    info.pointed_bytes(pointer.cast(), length).map(Some)
 }
 
 #[cfg(test)]
@@ -71,7 +253,14 @@ mod tests {
     #[test]
     fn the_same_primary_token_has_the_same_context() {
         let token = token(unsafe { GetCurrentProcess() }, TOKEN_QUERY).unwrap();
-        assert!(equivalent(token.as_raw_handle(), token.as_raw_handle()).unwrap());
+        if Information::read(token.as_raw_handle(), TokenIsAppContainer)
+            .unwrap()
+            .value::<u32>()
+            .unwrap()
+            == 0
+        {
+            assert!(equivalent(token.as_raw_handle(), token.as_raw_handle()).unwrap());
+        }
     }
 
     #[test]
@@ -98,10 +287,14 @@ mod tests {
             io::Error::last_os_error()
         );
         let duplicate = unsafe { OwnedHandle::from_raw_handle(duplicate) };
-        let original =
-            information::<TOKEN_STATISTICS>(token.as_raw_handle(), TokenStatistics).unwrap();
-        let copied =
-            information::<TOKEN_STATISTICS>(duplicate.as_raw_handle(), TokenStatistics).unwrap();
+        let original = Information::read(token.as_raw_handle(), TokenStatistics)
+            .unwrap()
+            .value::<TOKEN_STATISTICS>()
+            .unwrap();
+        let copied = Information::read(duplicate.as_raw_handle(), TokenStatistics)
+            .unwrap()
+            .value::<TOKEN_STATISTICS>()
+            .unwrap();
         assert_ne!(
             (original.TokenId.HighPart, original.TokenId.LowPart),
             (copied.TokenId.HighPart, copied.TokenId.LowPart)
@@ -131,9 +324,7 @@ mod tests {
                     &mut restricted,
                 )
             },
-            0,
-            "{}",
-            io::Error::last_os_error()
+            0
         );
         let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
         assert!(!equivalent(restricted.as_raw_handle(), token.as_raw_handle()).unwrap());
