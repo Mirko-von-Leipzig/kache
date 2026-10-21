@@ -70,3 +70,13 @@ jobs:
           'Child context'
           & (Get-Process -Id $PID).Path -NoProfile -Command 'Add-Type -Path $env:PROBE_SOURCE; [TokenProbe]::Run()'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Check native IPC admission and transfer tests
+        shell: pwsh
+        env:
+          RUSTC_WRAPPER: ''
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.99.0 test --locked -p kache-ipc --no-default-features -- --nocapture
+          exit $LASTEXITCODE

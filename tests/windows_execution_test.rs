@@ -543,8 +543,8 @@ fn native_console_fixture() {
             let mut command = compile(&fixture, &fixture.path(frontend), &rustc, "console_canary");
             command
                 .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
+                .stdout(Stdio::from(console.try_clone().unwrap()))
+                .stderr(Stdio::from(console.try_clone().unwrap()));
             let output = fixture.spawn_native(&mut command).output();
             let mut characters = vec![0u16; cells as usize];
             let mut read = 0;

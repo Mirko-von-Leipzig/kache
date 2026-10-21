@@ -1015,7 +1015,7 @@ printf '{"workspace_root":"%s/project","packages":[{"name":"%s"}]}' "$CLIENT_ROO
         let dir = tempfile::tempdir().unwrap();
         let cargo = fake_cargo(
             dir.path(),
-            "printf '%s' \"$METADATA_JSON\"\nexec 1>&-\nexec /bin/sleep \"$METADATA_DELAY\"",
+            "printf '%s' \"$METADATA_JSON\"\nexec 1>&-\nexec sleep \"$METADATA_DELAY\"",
         );
         let mut env = InvocationEnv::from_parts(
             [
@@ -1029,6 +1029,7 @@ printf '{"workspace_root":"%s/project","packages":[{"name":"%s"}]}' "$CLIENT_ROO
             None,
             dir.path().to_owned(),
         );
+        env.set("PATH", InvocationEnv::capture().var_os("PATH").unwrap());
         let discovered = run_cargo_metadata_for(cargo.as_os_str(), None, soon(3000), &env).unwrap();
         assert_eq!(discovered.crate_names, ["early-eof"]);
         assert_eq!(
