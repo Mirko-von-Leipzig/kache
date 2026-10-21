@@ -3,7 +3,7 @@
 use std::io;
 use std::mem::{offset_of, size_of};
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
-use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -32,10 +32,9 @@ impl Information {
         unsafe {
             GetTokenInformation(token, class, std::ptr::null_mut(), 0, &mut length);
         }
-        if io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
-            || length == 0
-            || length > (1 << 20)
-        {
+        // The required size is useful even when a class reports BAD_LENGTH
+        // rather than INSUFFICIENT_BUFFER. The second call must still succeed.
+        if length == 0 || length > (1 << 20) {
             return Err(io::Error::other("cannot size compiler security context"));
         }
         let mut storage = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];

@@ -661,7 +661,12 @@ mod windows_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(child.0.wait().unwrap().success());
+        let status = child.0.wait().unwrap();
+        let mut diagnostics = String::new();
+        if let Some(mut stderr) = child.0.stderr.take() {
+            stderr.read_to_string(&mut diagnostics).unwrap();
+        }
+        assert!(status.success(), "{diagnostics}");
         assert_eq!(
             std::fs::read_to_string(root.path().join("received")).unwrap(),
             "0,0,0"
