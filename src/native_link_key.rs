@@ -172,11 +172,18 @@ fn crt_memo_material(driver: &Path, env: &InvocationEnv) -> Option<(PathBuf, Str
 
 fn directory_stamp(directory: &Path) -> Option<String> {
     let metadata = std::fs::metadata(directory).ok()?;
-    Some(format!(
+    let stamp = format!(
         "{}:{}",
         crate::cache_key::metadata_mtime_ns(&metadata),
         crate::cache_key::metadata_ctime_ns(&metadata)
-    ))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(format!("{stamp}:{}", metadata.mode()))
+    }
+    #[cfg(not(unix))]
+    Some(stamp)
 }
 
 #[cfg(all(test, unix))]
@@ -2736,6 +2743,29 @@ done
         assert!(missing.to_string().contains("not installed"), "{missing:#}");
         let gone = format!("--ld-path={}", root.join("nowhere").display());
         assert!(place(&[&gone]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn location_stamps_include_the_candidates_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = directory.path().join("ld.mold");
+        std::fs::write(&candidate, "linker").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let metadata = std::fs::metadata(&candidate).unwrap();
+        // Checking the mode independently of clock advancement catches a
+        // chmod within one filesystem timestamp tick on every test run.
+        assert_eq!(
+            directory_stamp(&candidate),
+            Some(format!(
+                "{}:{}:{}",
+                crate::cache_key::metadata_mtime_ns(&metadata),
+                crate::cache_key::metadata_ctime_ns(&metadata),
+                0o100640 // regular file with the permissions above
+            ))
+        );
     }
 
     /// The placement is remembered, a linker replaced in place re-keys
