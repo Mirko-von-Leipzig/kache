@@ -201,6 +201,15 @@ def paired_count_growth(base, head, design=None):
     return result
 
 
+def compilation_passthroughs(events):
+    """Older summaries without query counts conservatively keep all passthroughs."""
+    total = events["results"].get("passthrough", 0)
+    probed = events.get("probed", 0)
+    if any(type(value) is not int or value < 0 for value in (total, probed)) or probed > total:
+        raise ValueError("invalid contention passthrough or probe counts")
+    return total - probed
+
+
 def contention_comparison(records, design=None):
     if design is not None:
         checked(design)
@@ -247,7 +256,7 @@ def contention_comparison(records, design=None):
         for key in keys:
             b, h = base[key]["events"], head[key]["events"]
             # Cold work varies with overlap and needs repeated paired evidence.
-            # A warm cache must not add compiles, misses or passthroughs.
+            # A warm cache must not add compiles, misses or compilation passthroughs.
             if (
                 phase == "warm"
                 and h["duplicate_key_compiles"] > b["duplicate_key_compiles"]
@@ -256,8 +265,11 @@ def contention_comparison(records, design=None):
                     f"contention {phase} sample {key[0]}: duplicate key compiles increased"
                 )
             if phase == "warm":
-                for result in ("miss", "passthrough"):
-                    if h["results"].get(result, 0) > b["results"].get(result, 0):
+                for result, before, after in (
+                    ("miss", b["results"].get("miss", 0), h["results"].get("miss", 0)),
+                    ("passthrough", compilation_passthroughs(b), compilation_passthroughs(h)),
+                ):
+                    if after > before:
                         failures.append(
                             f"contention warm sample {key[0]}: {result} count increased"
                         )

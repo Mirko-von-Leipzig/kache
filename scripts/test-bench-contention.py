@@ -429,6 +429,31 @@ else:
             with self.assertRaisesRegex(ValueError, "no Kache build events"):
                 bench.aggregate_events(events)
 
+    def test_queries_are_separate_from_compilation_passthroughs(self):
+        reasons = [
+            "not-a-compile|query / probe (--print, -vV)",
+            " not-a-compile |query",
+            "not-a-compile",
+            "unsupported|not-a-compile is only text here",
+            "not-a-compile-other|unknown category",
+            "",
+        ]
+        events = [
+            {"crate_name": "___", "result": "passthrough", "passthrough_reason": reason}
+            for reason in reasons
+        ]
+        events += [
+            {"crate_name": "legacy", "result": "passthrough"},
+            {"crate_name": "lib", "result": "local_hit", "passthrough_reason": reasons[0]},
+        ]
+        summary = bench.aggregate_events(events)
+        self.assertEqual(summary["results"], {"passthrough": 7, "local_hit": 1})
+        self.assertEqual(summary["probed"], 3)
+        self.assertEqual(summary["by_unit"]["___"]["passthrough"], 6)
+
+        summary = bench.aggregate_events([{"crate_name": "legacy", "result": "passthrough"}])
+        self.assertEqual(summary["probed"], 0)
+
     def test_duplicate_compiles_keep_skip_reasons_and_render_legacy_unknowns(self):
         from bench.report import contention
 

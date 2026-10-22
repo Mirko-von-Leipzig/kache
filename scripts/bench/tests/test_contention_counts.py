@@ -74,6 +74,38 @@ class ContentionCountTests(unittest.TestCase):
         _, failures = stats.contention_comparison(rows, schedule)
         self.assertEqual(failures, ["contention cold: paired timing regression"])
 
+    def test_query_growth_does_not_count_as_uncached_compilation(self):
+        for compiles in (0, 2):
+            rows = records([0], [0])
+            for row in rows:
+                if row["phase"] == "warm":
+                    queries = 13 if row["arm"] == "base" else 18
+                    row["events"].update(probed=queries, results={"passthrough": queries + compiles})
+            _, failures = stats.contention_comparison(rows)
+            self.assertEqual(failures, [])
+
+    def test_fewer_queries_cannot_hide_more_compilation_passthroughs(self):
+        rows = records([0], [0])
+        for row in rows:
+            if row["phase"] == "warm":
+                row["events"].update(
+                    {"probed": 18, "results": {"passthrough": 19}}
+                    if row["arm"] == "base" else
+                    {"probed": 13, "results": {"passthrough": 15}}
+                )
+        _, failures = stats.contention_comparison(rows)
+        self.assertEqual(failures, ["contention warm sample 0: passthrough count increased"])
+
+    def test_invalid_query_counts_cannot_hide_passthroughs(self):
+        for arm in ("base", "head"):
+            for value in (-1, True, 1.0, "1", 2):
+                with self.subTest(arm=arm, probed=value):
+                    rows = records([0], [0])
+                    event = next(r["events"] for r in rows if r["arm"] == arm and r["phase"] == "warm")
+                    event.update(probed=value, results={"passthrough": 1})
+                    with self.assertRaisesRegex(ValueError, "invalid.*passthrough|invalid.*probe"):
+                        stats.contention_comparison(rows)
+
     def test_ties_do_not_count_as_directional_evidence(self):
         growth = stats.paired_count_growth([0] * 6, [0] * 6)
         self.assertEqual(growth["nonzero_pairs"], 0)

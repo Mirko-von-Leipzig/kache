@@ -379,7 +379,7 @@ def comparison_detail(projects):
         body.append("| Cold contention duplicate compiles | " + " | ".join(cells) + " |")
     body += [
         "",
-        "Base/head order is randomized per cold seed. Warm repeats from one seed form one block. Exact two-sided assignment tests compare against zero change; Bonferroni correction covers the predeclared timing/count family. Parentheses show simultaneous family intervals under a constant proportional effect model, conditional on this run. Unbounded intervals and legacy runs stay inconclusive. Nonsignificance does not establish parity. Warm increases in duplicate compiles, misses or passthroughs fail immediately. `samples.json` retains the schedule and raw reports.",
+        "Base/head order is randomized per cold seed. Warm repeats from one seed form one block. Exact two-sided assignment tests compare against zero change; Bonferroni correction covers the predeclared timing/count family. Parentheses show simultaneous family intervals under a constant proportional effect model, conditional on this run. Unbounded intervals and legacy runs stay inconclusive. Nonsignificance does not establish parity. Warm increases in duplicate compiles, misses or compilation passthroughs fail immediately. Compiler queries are counted separately. `samples.json` retains the schedule and raw reports.",
     ]
     return details("Paired comparison", body)
 

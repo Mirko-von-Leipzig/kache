@@ -194,6 +194,13 @@ def aggregate_events(events):
         unit[event["result"]] += 1
     return {
         "results": dict(results),
+        # Match the isolated runner: queries were never cacheable compilations.
+        # Keep them in the raw totals and record their count separately.
+        "probed": sum(
+            e["result"] == "passthrough"
+            and (e.get("passthrough_reason") or "").split("|", 1)[0].strip() == "not-a-compile"
+            for e in builds
+        ),
         "daemon_stores": sum(bool(e.get("store_handed_off")) for e in builds),
         "cache_errors": sum(
             bool(e.get("store_error") or e.get("lookup_rejection") or e.get("fallback"))
