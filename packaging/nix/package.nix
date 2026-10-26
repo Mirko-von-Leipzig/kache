@@ -3,9 +3,15 @@
   rustPlatform,
   cacert,
   stdenv,
+  bashInteractive,
+  zsh,
 }:
 let
   cargoToml = builtins.fromTOML (builtins.readFile ../../Cargo.toml);
+  completionShells = [
+    bashInteractive
+    zsh
+  ];
 in
 rustPlatform.buildRustPackage {
   pname = "kache";
@@ -40,6 +46,8 @@ rustPlatform.buildRustPackage {
     "kache"
   ];
 
+  nativeCheckInputs = completionShells;
+
   # The tmutil xattr test shells out to /usr/bin/tmutil which isn't in the sandbox.
   checkFlags = lib.optionals stdenv.hostPlatform.isDarwin [
     "--skip=store::tests::test_exclude_from_indexing_sets_tmutil_xattr"
@@ -70,6 +78,8 @@ rustPlatform.buildRustPackage {
   # (#756). Raise the soft limit toward the hard limit; best-effort so a
   # builder with a lower hard cap still runs.
   preCheck = ''
+    # Completion tests need programmable completion, absent from the build shell.
+    export PATH="${lib.makeBinPath completionShells}:$PATH"
     ulimit -n 4096 2>/dev/null || true
   '';
 
