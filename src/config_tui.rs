@@ -811,6 +811,11 @@ fn fields_to_file_config(fields: &[FormField], original: &FileConfig) -> FileCon
                 .as_ref()
                 .and_then(|cache| cache.remote.as_ref())
                 .and_then(|remote| remote.pull_request_prefix.clone()),
+            download_endpoint: original
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.remote.as_ref())
+                .and_then(|remote| remote.download_endpoint.clone()),
             _type: remote_type,
             bucket,
             endpoint,
@@ -2234,6 +2239,7 @@ mod tests {
                     _type: Some("s3".to_string()),
                     bucket: Some("test-bucket".to_string()),
                     endpoint: Some("https://s3.example.com".to_string()),
+                    download_endpoint: Some("https://cache.example.com".to_string()),
                     region: Some("eu-west-1".to_string()),
                     prefix: Some("my-project".to_string()),
                     profile: Some("build-account".to_string()),
@@ -2249,6 +2255,18 @@ mod tests {
 
         let fields = build_fields(&original, &empty_env());
         let reconstructed = fields_to_file_config(&fields, &original);
+        assert_eq!(
+            reconstructed
+                .cache
+                .as_ref()
+                .and_then(|c| c.remote.as_ref())
+                .and_then(|r| r.download_endpoint.as_deref()),
+            original
+                .cache
+                .as_ref()
+                .and_then(|c| c.remote.as_ref())
+                .and_then(|r| r.download_endpoint.as_deref())
+        );
 
         let cache = reconstructed.cache.as_ref().unwrap();
         assert_eq!(
@@ -2405,6 +2423,18 @@ mod tests {
 
         let fields = build_fields(&original, &empty_env());
         let reconstructed = fields_to_file_config(&fields, &original);
+        assert_eq!(
+            reconstructed
+                .cache
+                .as_ref()
+                .and_then(|c| c.remote.as_ref())
+                .and_then(|r| r.download_endpoint.as_deref()),
+            original
+                .cache
+                .as_ref()
+                .and_then(|c| c.remote.as_ref())
+                .and_then(|r| r.download_endpoint.as_deref())
+        );
         let remote = reconstructed
             .cache
             .as_ref()

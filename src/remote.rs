@@ -1213,6 +1213,7 @@ mod tests {
             backend: crate::config::RemoteBackendConfig::S3(crate::config::S3RemoteConfig {
                 bucket,
                 endpoint: Some(endpoint),
+                download_endpoint: None,
                 region: "us-east-1".to_string(),
                 profile: None,
                 user_agent: None,

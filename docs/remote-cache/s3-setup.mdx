@@ -48,6 +48,29 @@ The region defaults to `us-east-1`. Kache does not read `AWS_REGION` or `AWS_DEF
   </Tab>
 </Tabs>
 
+## Download through CloudFront
+
+Set a separate `download_endpoint` to read through a CDN while uploading directly to S3:
+
+```toml
+[cache.remote]
+type = "s3"
+bucket = "my-build-cache"
+region = "eu-west-1"
+prefix = "artifacts"
+download_endpoint = "https://example.cloudfront.net"
+```
+
+The URL points at the bucket root: Kache requests `/artifacts/...`, without adding the bucket name. It uses anonymous HTTPS for downloads, existence checks, and listings even when AWS credentials are available. It never sends those credentials to the CDN, follows redirects, or falls back to direct S3 downloads. This setting is available in the config file only.
+
+Uploads still use the S3 credential chain below. Reads used to merge manifests before conditional uploads also use S3, so writers see the current object and entity tag. These are small metadata requests; artifact downloads use the CDN.
+
+For a reader without AWS credentials, also set `[cache] remote_readonly = true`. This disables uploads; enforce read-only access at the CDN and bucket as well.
+
+Keep the bucket private and grant the distribution read-only access with [CloudFront origin access control](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html). Allow `GET` and `HEAD`, limit object access to the intended prefixes, and permit prefix-scoped `s3:ListBucket` if using `kache sync` or remote key listing. Anonymous CDN access makes the selected artifacts publicly downloadable.
+
+Cache immutable `*/v3/packs/*` objects. Disable caching for manifests, predictions, and listings; forward all listing query parameters, including `prefix` and `continuation-token`. Disable negative caching of missing objects so a reader can see a subsequent upload. AWS's managed `CachingDisabled` and `AllViewerExceptHostHeader` policies support the uncached paths without custom policies.
+
 ## Credentials
 
 Kache checks these sources in order:

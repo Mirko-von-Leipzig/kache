@@ -689,6 +689,8 @@ pub struct GcsRemoteConfig {
 pub struct S3RemoteConfig {
     pub bucket: String,
     pub endpoint: Option<String>,
+    /// Anonymous CDN URL for downloads; uploads and conditional-update reads use S3.
+    pub download_endpoint: Option<String>,
     pub region: String,
     /// AWS profile name for credential lookup (e.g. "ceph").
     pub profile: Option<String>,
@@ -763,6 +765,7 @@ impl RemoteConfig {
             backend: RemoteBackendConfig::S3(S3RemoteConfig {
                 bucket: bucket.to_string(),
                 endpoint: None,
+                download_endpoint: None,
                 region: "us-east-1".to_string(),
                 profile: None,
                 user_agent: None,
@@ -1043,6 +1046,8 @@ pub struct RemoteFileConfig {
     pub bucket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2568,6 +2573,7 @@ impl Config {
         };
         let inapplicable = file_remote.is_some_and(|r| {
             [
+                &r.download_endpoint,
                 &r.region,
                 &r.profile,
                 &r.user_agent,
@@ -2580,7 +2586,7 @@ impl Config {
         if inapplicable {
             anyhow::bail!(
                 "[cache.remote] type = \"gcs\" takes bucket, prefix and endpoint only; \
-                 region, profile, user_agent, path and atomic_write_dir do not apply"
+                 download_endpoint, region, profile, user_agent, path and atomic_write_dir do not apply"
             );
         }
         let bucket = field(file_remote.and_then(|r| r.bucket.as_ref()))
@@ -2601,6 +2607,7 @@ impl Config {
         if [
             &remote.bucket,
             &remote.endpoint,
+            &remote.download_endpoint,
             &remote.region,
             &remote.profile,
             &remote.user_agent,
@@ -2652,9 +2659,16 @@ impl Config {
             .map(str::to_ascii_lowercase);
 
         let file_has_s3_fields = file_remote.is_some_and(|r| {
-            [&r.bucket, &r.endpoint, &r.region, &r.profile, &r.user_agent]
-                .into_iter()
-                .any(|v| v.as_deref().is_some_and(|v| !v.trim().is_empty()))
+            [
+                &r.bucket,
+                &r.endpoint,
+                &r.download_endpoint,
+                &r.region,
+                &r.profile,
+                &r.user_agent,
+            ]
+            .into_iter()
+            .any(|v| v.as_deref().is_some_and(|v| !v.trim().is_empty()))
         });
         let file_has_filesystem_fields = file_remote.is_some_and(|r| {
             [&r.path, &r.atomic_write_dir]
@@ -2679,7 +2693,7 @@ impl Config {
             Some("filesystem" | "fs") => {
                 if file_has_s3_fields {
                     anyhow::bail!(
-                        "[cache.remote] type = \"filesystem\" cannot include S3 bucket, endpoint, region, profile, or user_agent"
+                        "[cache.remote] type = \"filesystem\" cannot include S3 bucket, endpoint, download_endpoint, region, profile, or user_agent"
                     );
                 }
                 true
@@ -2832,6 +2846,7 @@ impl Config {
             backend: RemoteBackendConfig::S3(S3RemoteConfig {
                 bucket,
                 endpoint,
+                download_endpoint: file_remote.and_then(|r| r.download_endpoint.clone()),
                 region,
                 profile,
                 user_agent,

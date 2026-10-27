@@ -823,6 +823,7 @@ fn remote_key_listing_defaults_to_on_only_for_a_filesystem_remote() {
         backend: RemoteBackendConfig::S3(S3RemoteConfig {
             bucket: "bucket".to_string(),
             endpoint: None,
+            download_endpoint: None,
             region: "us-east-1".to_string(),
             profile: None,
             user_agent: None,
@@ -2878,6 +2879,7 @@ fn test_file_config_roundtrip() {
                 _type: Some("s3".to_string()),
                 bucket: Some("my-bucket".to_string()),
                 endpoint: Some("https://s3.example.com".to_string()),
+                download_endpoint: None,
                 region: Some("eu-west-1".to_string()),
                 prefix: Some("my-prefix".to_string()),
                 profile: None,
@@ -5133,6 +5135,7 @@ fn test_load_remote_config_from_file_fields() {
                 _type: Some("s3".to_string()),
                 bucket: Some("filebucket".to_string()),
                 endpoint: Some("https://s3.example.com".to_string()),
+                download_endpoint: None,
                 region: Some("eu-west-2".to_string()),
                 prefix: Some("myprefix".to_string()),
                 profile: Some("  ceph  ".to_string()),
@@ -6069,4 +6072,51 @@ fn the_default_floor_is_ten_gib_and_the_user_file_never_a_project_one() {
     assert_eq!(user_config_path(), chosen);
     let _unset = set_env_for_test("KACHE_CONFIG", None);
     assert_eq!(user_config_path(), config_file_path());
+}
+
+#[test]
+fn s3_download_endpoint_survives_file_configuration() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [cache]
+        ignore_env = true
+        [cache.remote]
+        type = "s3"
+        bucket = "cache"
+        download_endpoint = "https://cache.example.com"
+    "#,
+    )
+    .unwrap();
+    let invocation = InvocationEnv::capture();
+    let remote = Config::load_remote_config_for(&invocation, &Ok(file))
+        .unwrap()
+        .unwrap();
+    let RemoteBackendConfig::S3(s3) = remote.backend else {
+        panic!("expected S3")
+    };
+    assert_eq!(
+        s3.download_endpoint.as_deref(),
+        Some("https://cache.example.com")
+    );
+    assert_eq!(s3.endpoint, None);
+}
+
+#[test]
+fn download_endpoint_is_rejected_for_other_backends() {
+    for kind in ["filesystem", "gcs", "oci"] {
+        let file: FileConfig = toml::from_str(&format!(
+            r#"
+            [cache]
+            ignore_env = true
+            [cache.remote]
+            type = "{kind}"
+            download_endpoint = "https://cache.example.com"
+        "#
+        ))
+        .unwrap();
+        assert!(
+            Config::load_remote_config_for(&InvocationEnv::capture(), &Ok(file)).is_err(),
+            "{kind}"
+        );
+    }
 }

@@ -2246,6 +2246,7 @@ pub(crate) mod tests {
             backend: crate::config::RemoteBackendConfig::S3(crate::config::S3RemoteConfig {
                 bucket: "bucket".to_string(),
                 endpoint: None,
+                download_endpoint: None,
                 region: "us-east-1".to_string(),
                 profile: None,
                 user_agent: None,

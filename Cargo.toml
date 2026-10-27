@@ -69,6 +69,7 @@ bytes = "1"
 # core, S3, filesystem, retry, and reqwest transport modules keeps Kache's
 # supported backend set explicit and avoids compiling unused services.
 opendal = { package = "opendal-core", version = "=0.59.5", default-features = false, features = ["executors-tokio"] }
+http = "1"
 opendal-http-transport-reqwest = { version = "=0.59.5", default-features = false, features = ["rustls-no-provider"] }
 opendal-layer-retry = { version = "=0.59.5", default-features = false }
 opendal-service-fs = { version = "=0.59.5", default-features = false }

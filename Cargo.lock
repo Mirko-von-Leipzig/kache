@@ -2391,6 +2391,7 @@ dependencies = [
  "glob",
  "hex",
  "home",
+ "http",
  "interprocess",
  "jobserver",
  "kache-client",

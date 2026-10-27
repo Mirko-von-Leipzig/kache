@@ -8,6 +8,7 @@
 mod download_memory;
 mod oci;
 mod s3_credentials;
+mod s3_download;
 
 use download_memory::{BudgetedBody, DOWNLOAD_MEMORY, DownloadMemory};
 pub(crate) use s3_credentials::CredentialFailure;
@@ -202,6 +203,7 @@ pub trait RemoteBackend: Send + Sync {
 /// OpenDAL-backed object transport.
 pub struct OpenDalBackend {
     operator: Operator,
+    download_operator: Option<Operator>,
     root_description: String,
     /// Canonical filesystem root, for the filesystem backend only. Present means
     /// "this backend writes real paths", which enables the extra key rules and the
@@ -224,6 +226,7 @@ impl OpenDalBackend {
     pub(crate) fn new(operator: Operator, root_description: String) -> Self {
         Self {
             operator,
+            download_operator: None,
             root_description,
             filesystem_root: None,
             download_memory: DOWNLOAD_MEMORY.clone(),
@@ -232,6 +235,11 @@ impl OpenDalBackend {
             refusal_may_be_absence: true,
             credentials: None,
         }
+    }
+
+    /// Selects anonymous CDN reads when configured, without an S3 fallback.
+    fn reader(&self) -> &Operator {
+        self.download_operator.as_ref().unwrap_or(&self.operator)
     }
 
     /// True for the first refused read only, so the explanation is logged once.
@@ -405,14 +413,14 @@ impl OpenDalBackend {
     /// response carried. The filesystem backend has none to give.
     async fn read_into(
         &self,
+        operator: &Operator,
         key: &str,
         max_bytes: Option<u64>,
         destination: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> Result<Option<(GetTransfer, Option<String>)>> {
         self.validate_key("GET", key, false)?;
         let request_start = Instant::now();
-        let reader = self
-            .operator
+        let reader = operator
             .reader(key)
             .await
             .map_err(|error| self.contextual_error("GET", key, error))?;
@@ -434,7 +442,7 @@ impl OpenDalBackend {
             Err(error) if error.kind() == ErrorKind::Unsupported => {
                 // A separate stat can describe a newer object than the one
                 // read, so its tag is not offered for a conditional write.
-                match self.operator.stat(key).await {
+                match operator.stat(key).await {
                     Ok(metadata) => (Some(metadata.content_length()), None),
                     Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
                     Err(error) => return Err(self.contextual_error("STAT", key, error)),
@@ -510,7 +518,7 @@ impl OpenDalBackend {
 impl RemoteBackend for OpenDalBackend {
     async fn head(&self, key: &str) -> Result<bool> {
         self.validate_key("HEAD", key, false)?;
-        match self.operator.stat(key).await {
+        match self.reader().stat(key).await {
             Ok(metadata) => Ok(metadata.is_file()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
             Err(error) if self.refusal_means_absent(&error) => Ok(false),
@@ -542,7 +550,7 @@ impl RemoteBackend for OpenDalBackend {
         destination: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> Result<Option<GetTransfer>> {
         Ok(self
-            .read_into(key, max_bytes, destination)
+            .read_into(self.reader(), key, max_bytes, destination)
             .await?
             .map(|(transfer, _)| transfer))
     }
@@ -555,7 +563,10 @@ impl RemoteBackend for OpenDalBackend {
         self.validate_key("GET", key, false)?;
         let memory = self.download_memory.acquire(max_bytes).await?;
         let mut body = Vec::new();
-        let Some((transfer, etag)) = self.read_into(key, max_bytes, &mut body).await? else {
+        let Some((transfer, etag)) = self
+            .read_into(&self.operator, key, max_bytes, &mut body)
+            .await?
+        else {
             return Ok(None);
         };
         let object = GetObject {
@@ -644,7 +655,7 @@ impl RemoteBackend for OpenDalBackend {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.validate_key("LIST", prefix, true)?;
-        let mut lister = match self.operator.lister_with(prefix).recursive(true).await {
+        let mut lister = match self.reader().lister_with(prefix).recursive(true).await {
             Ok(lister) => lister,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(self.contextual_error("LIST", prefix, error)),
@@ -1134,6 +1145,13 @@ fn s3_backend(
     );
     backend.region = Some(config.region.clone());
     backend.credentials = Some(status);
+    backend.download_operator = config
+        .download_endpoint
+        .as_deref()
+        .map(|endpoint| {
+            s3_download::operator(endpoint, pool_idle_secs, config.user_agent.as_deref())
+        })
+        .transpose()?;
     Ok(backend)
 }
 
@@ -2179,6 +2197,7 @@ mod tests {
         let config = S3RemoteConfig {
             bucket: "bucket".to_string(),
             endpoint: Some("http://127.0.0.1:9000".to_string()),
+            download_endpoint: None,
             region: "us-east-1".to_string(),
             profile: Some("team".to_string()),
             user_agent: Some("custom-ua/1.0".to_string()),
@@ -3140,6 +3159,7 @@ mod tests {
         let config = S3RemoteConfig {
             bucket: "bucket".to_string(),
             endpoint: Some(endpoint),
+            download_endpoint: None,
             region: "us-east-1".to_string(),
             profile: None,
             user_agent: user_agent.map(str::to_string),
@@ -3233,6 +3253,7 @@ mod tests {
         let config = S3RemoteConfig {
             bucket: "bucket".to_string(),
             endpoint: Some(endpoint),
+            download_endpoint: None,
             region: "us-east-1".to_string(),
             profile: None,
             user_agent: None,
@@ -3281,5 +3302,210 @@ mod tests {
             error.downcast_ref::<CredentialFailure>().is_none(),
             "{error:#}"
         );
+    }
+    fn cdn_backend(origin: &str, cdn: &str) -> OpenDalBackend {
+        s3_backend(
+            &S3RemoteConfig {
+                bucket: "cache-bucket".into(),
+                endpoint: Some(origin.into()),
+                download_endpoint: Some(cdn.into()),
+                region: "eu-north-1".into(),
+                profile: None,
+                user_agent: None,
+            },
+            30,
+            Some(Credential {
+                access_key_id: "writer-access".into(),
+                secret_access_key: "writer-secret".into(),
+                session_token: Some("writer-token".into()),
+                expires_in: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cdn_downloads_are_anonymous_and_do_not_include_the_bucket() {
+        let (cdn, requests) = mock_http_server(vec![
+            http_response("200 OK", ""),
+            http_response("200 OK", "hello"),
+            http_response("200 OK", "streamed"),
+        ])
+        .await;
+        let backend = cdn_backend("http://127.0.0.1:1", &format!("{cdn}/cache/"));
+        assert!(backend.head("prs/a b").await.unwrap());
+        assert_eq!(
+            backend.get("prs/a b", Some(5)).await.unwrap().unwrap().body,
+            "hello"
+        );
+        let mut sink = Vec::new();
+        assert_eq!(
+            backend
+                .get_into("prs/a b", Some(8), &mut sink)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            8
+        );
+        assert_eq!(sink, b"streamed");
+        for request in requests.await.unwrap() {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains(" /cache/prs/a%20b "), "{request}");
+            assert!(!request.contains("authorization:"));
+            assert!(!request.contains("x-amz-security-token:"));
+            assert!(!request.contains("writer-"));
+            assert!(!request.contains("cache-bucket"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cdn_failures_and_misses_never_fall_back_to_s3() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}", origin.local_addr().unwrap());
+        let (cdn, requests) = mock_http_server(vec![
+            http_response("404 Not Found", ""),
+            http_response("503 Service Unavailable", "<Error><Code>SlowDown</Code></Error>"),
+            format!("HTTP/1.1 302 Found\r\nLocation: {origin_url}/key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+        ]).await;
+        let backend = cdn_backend(&origin_url, &cdn);
+        assert!(backend.get("missing", None).await.unwrap().is_none());
+        assert!(backend.get("unavailable", None).await.is_err());
+        assert!(backend.get("redirect", None).await.is_err());
+        assert_eq!(requests.await.unwrap().len(), 3);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), origin.accept())
+                .await
+                .is_err(),
+            "download attempted to contact S3"
+        );
+    }
+
+    #[tokio::test]
+    async fn cdn_reads_enforce_size_and_complete_body_checks() {
+        let (cdn, requests) = mock_http_server(vec![
+            http_response("200 OK", "too large"),
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".into(),
+        ])
+        .await;
+        let backend = cdn_backend("http://127.0.0.1:1", &cdn);
+        assert!(
+            backend
+                .get("oversized", Some(3))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
+        assert!(backend.get("truncated", None).await.is_err());
+        assert_eq!(requests.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cdn_listing_preserves_prefix_and_pagination_queries() {
+        let page = |key: &str, tail: &str| {
+            format!(
+                "<ListBucketResult><Name>cache-bucket</Name><Contents><Key>prs/{key}</Key><Size>5</Size><LastModified>2026-10-27T00:00:00Z</LastModified></Contents>{tail}</ListBucketResult>"
+            )
+        };
+        let (cdn, requests) = mock_http_server(vec![
+            http_response("200 OK", &page("first", "<IsTruncated>true</IsTruncated><NextContinuationToken>next-token</NextContinuationToken>")),
+            http_response("200 OK", &page("second", "<IsTruncated>false</IsTruncated>")),
+        ]).await;
+        let backend = cdn_backend("http://127.0.0.1:1", &format!("{cdn}/root"));
+        assert_eq!(
+            backend.list("prs/").await.unwrap(),
+            ["prs/first", "prs/second"]
+        );
+        let requests = requests.await.unwrap();
+        for request in &requests {
+            assert!(request.starts_with("GET /root/?"), "{request}");
+            assert!(request.contains("list-type=2"));
+            let target = request.split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("https://cache.example{target}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(name, value)| name == "prefix" && value == "prs/")
+            );
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        }
+        assert!(requests[1].contains("continuation-token=next-token"));
+    }
+
+    #[tokio::test]
+    async fn cdn_configuration_keeps_writes_and_versioned_reads_on_signed_s3() {
+        let versioned = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nfresh";
+        let (origin, requests) = mock_http_server(vec![
+            versioned.into(),
+            http_response("200 OK", ""),
+            http_response("200 OK", ""),
+            http_response("200 OK", ""),
+        ])
+        .await;
+        let backend = cdn_backend(&origin, "http://127.0.0.1:1");
+        let (object, etag) = backend
+            .get_versioned("prs/manifest", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(object.body, "fresh");
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        assert_eq!(
+            backend
+                .put_if_match("prs/manifest", b"new".to_vec(), None, etag.as_deref())
+                .await
+                .unwrap(),
+            ConditionalPut::Stored
+        );
+        backend
+            .put("prs/object", b"data".to_vec(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .put_if_absent("prs/immutable", b"new".to_vec(), None)
+                .await
+                .unwrap(),
+            PutIfAbsentResult::Created
+        );
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /cache-bucket/prs/manifest "));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("if-match: \"v1\"")
+        );
+        assert!(
+            requests[3]
+                .to_ascii_lowercase()
+                .contains("if-none-match: *")
+        );
+        for request in requests {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: aws4-hmac-sha256")
+            );
+            assert!(request.contains("writer-access"));
+            assert!(request.contains("writer-token"));
+        }
+    }
+
+    #[test]
+    fn cdn_endpoint_rejects_credentials_queries_and_unsafe_schemes() {
+        for endpoint in [
+            "",
+            "relative/path",
+            "http://cache.example.com",
+            "ftp://cache.example.com",
+            "https://user:secret@cache.example.com",
+            "https://cache.example.com?token=secret",
+            "https://cache.example.com#fragment",
+        ] {
+            assert!(
+                s3_download::operator(endpoint, 30, None).is_err(),
+                "{endpoint}"
+            );
+        }
     }
 }
