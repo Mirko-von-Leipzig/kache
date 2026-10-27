@@ -1519,7 +1519,11 @@ impl ActivePlan {
                 self.used.insert(key.to_string());
             }
         }
-        if self.cancelled {
+        // Preserve requests received while planning without judging an empty plan.
+        //
+        // The session starts before candidate discovery finishes; those requests
+        // become evidence for cancellation only after a plan is installed.
+        if self.cancelled || self.plan_source == "none" {
             return false;
         }
         let downloaded_not_demanded = self
@@ -5383,6 +5387,11 @@ impl Daemon {
                 existing.plan_id = plan.plan_id;
                 existing.plan_source = plan.plan_source;
                 existing.candidates = plan.candidates;
+                existing.demanded_candidates = existing
+                    .demanded
+                    .intersection(&existing.candidates)
+                    .cloned()
+                    .collect();
                 existing.cancelled = false;
                 existing.last_activity_ms = plan.last_activity_ms;
                 if plan.identity_key.is_some() {
