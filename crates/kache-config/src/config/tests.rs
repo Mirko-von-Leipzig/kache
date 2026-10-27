@@ -5711,10 +5711,9 @@ fn s3_user_agent_loaded_from_file_and_env() {
         "#;
     let file_cfg: Result<FileConfig> = toml::from_str(toml_fs).map_err(Into::into);
     let err = Config::load_remote_config(&file_cfg).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("cannot include S3 bucket, endpoint, download_endpoint, region, profile, or user_agent")
-    );
+    assert!(err.to_string().contains(
+        "cannot include S3 bucket, endpoint, download_endpoint, region, profile, or user_agent"
+    ));
 }
 
 fn gcs_remote(remote: RemoteFileConfig) -> Result<Option<RemoteConfig>> {
