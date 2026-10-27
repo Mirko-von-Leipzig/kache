@@ -53,7 +53,8 @@ jobs:
           export KACHE_RUNTIME_DIR="${RUNNER_TEMP}/kache-smoke-run"
           export KACHE_CONFIG="${RUNNER_TEMP}/kache-smoke.toml"
           printf '[cache]\n' > "${KACHE_CONFIG}"
-          trap 'install/kache daemon stop' EXIT
+          kache_bin="${PWD}/install/kache"
+          trap '"${kache_bin}" daemon stop' EXIT
           install/kache daemon start
           install/kache stats --json
           git rev-parse HEAD > dist/SOURCE_COMMIT
