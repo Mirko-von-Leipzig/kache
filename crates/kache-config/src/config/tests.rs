@@ -5713,7 +5713,7 @@ fn s3_user_agent_loaded_from_file_and_env() {
     let err = Config::load_remote_config(&file_cfg).unwrap_err();
     assert!(
         err.to_string()
-            .contains("cannot include S3 bucket, endpoint, region, profile, or user_agent")
+            .contains("cannot include S3 bucket, endpoint, download_endpoint, region, profile, or user_agent")
     );
 }
 
