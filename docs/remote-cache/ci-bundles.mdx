@@ -1,0 +1,86 @@
+---
+title: CI bundles (experimental)
+description: Trade some extra artifact transfer for fewer remote requests.
+---
+
+CI bundles warm an ephemeral runner with the artifacts and shared prediction
+metadata from a previous run of the same job. They are useful when the remote's
+request allowance is tighter than its transfer allowance.
+
+`save-bundle` selects artifacts from this cache's build events and packs them into
+immutable objects of at most 256 MiB and 1,024 entries each. It exports recent
+shared predictions for the job's crates using the same path relocation and
+identity checks as individual prediction uploads. The compressed manifest contains
+those predictions and the artifact pack references.
+
+`restore-bundle` downloads the manifest, seeds missing local predictions, then
+restores the artifact packs. Artifact hashes and entry metadata bindings are
+verified before import. A pack whose entries are already local is skipped. The
+command downloads whole packs, so changed dependencies can cause some extra
+transfer. Ordinary cache lookups still handle missing or oversized entries.
+
+## Trial in GitHub Actions
+
+Install matching `kache` and `kache-engine` binaries containing these commands.
+The `miden-kache-v2.0.0-rc.2-cloudfront.1` release does **not** contain them.
+Keep the current remote configuration and ordinary individual-object publishing
+in place. Both bundle commands use the configured backend, including CloudFront
+reads and the protected-branch/PR prefix rules.
+
+Use a stable key containing the job, operating system, architecture and relevant
+build configuration. A commit SHA would prevent the next commit from finding the
+previous bundle. Use a fresh local cache per CI job: `save-bundle` includes the
+cache's recorded build events, not a GitHub run ID.
+
+Enable the automatic lifecycle before the cache action runs:
+
+```yaml
+env:
+  KACHE_CI_BUNDLES: "true"
+```
+
+The cache action already exports `KACHE_MANIFEST_KEY` and starts the daemon.
+With this flag, `kache daemon start` restores the job's bundle before starting
+prefetch. An already-running daemon skips warmup. Wrapper-driven daemon starts
+are unchanged.
+
+During the action's existing post hook, `save-manifest` drains the daemon and
+publishes the updated bundle after saving the ordinary manifest. The existing
+`save-cache` setting and remote read-only policy still govern publication.
+The Docker build uses the same lifecycle calls; pass the flag into its container.
+No additional workflow steps or action fork are needed.
+
+The first writer seeds the bundle; a second run measures restore. Missing bundles
+are normal cache misses. Restore or publication failures warn and retain ordinary
+cache behavior. Restores preserve locally learned predictions and compilation
+still validates their tree guards.
+
+For manual diagnostics, `kache restore-bundle --key JOB` and
+`kache save-bundle --key JOB` remain available. Stop the daemon before these
+commands, and do not compile concurrently with them.
+
+## Limits and measurement
+
+- Restore downloads at most 10 GiB of compressed artifact packs by default.
+  `--max-bytes 0` restores only predictions; a positive byte count changes the
+  artifact budget. Skipped packs fall back to normal reads during compilation.
+- Entries larger than 255 MiB uncompressed remain on the individual-object path
+  to bound publisher memory. The bundle format's existing extractor also limits
+  decompression and verifies artifact contents.
+- Manifests expire after seven days and are capped at 64 MiB before and after
+  compression. Packs are published first; a failed upload leaves the previous
+  manifest intact. Concurrent writers publish complete snapshots, with the last
+  successful manifest write winning.
+- Object lifecycle rules should expire unused packs. The Miden cache already
+  expires all objects after 30 days. Bundle manifests live under `_manifests/`;
+  immutable artifacts live under `v4/prefetch/packs/`. With the current Miden
+  CloudFront policy those v4 objects are served through CloudFront but are not
+  edge-cached; adding an immutable-path behavior is a separate optimization.
+- Compare the same job before and after: total CloudFront requests and bytes,
+  bundle restore duration, overall job duration, local cache hits, and runner
+  disk use. The command prints restored/published pack, entry and prediction
+  counts. Its transfers are included in CloudFront logs, but are not currently
+  attributed to the daemon's transfer report.
+
+Removing `KACHE_CI_BUNDLES` disables the trial. Existing v3 objects and
+clients remain usable; no state migration or object deletion is required.

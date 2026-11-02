@@ -1,8 +1,8 @@
-name: Build Miden CloudFront trial
+name: Build Miden cache bundle trial
 
 on:
   push:
-    branches: [miden-cloudfront]
+    branches: [miden-cloudfront, miden-ci-bundles]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ""
+      KACHE_VERSION: v2.0.0-rc.2-miden.2
       CARGO_PROFILE_TEST_DEBUG: "0"
       TARGET: ${{ matrix.target }}
     steps:
@@ -39,16 +40,24 @@ jobs:
           ./scripts/with-test-resources.sh cargo test --locked --lib remote_backend::tests::
           ./scripts/with-test-resources.sh cargo test --locked --lib config_tui::tests::
           cargo test --locked -p kache-config
+          cargo test --locked --lib remote_bundle::tests::
+          cargo test --locked --lib remote_pack::tests::
+          cargo test --locked --lib prediction_share::tests::
+          cargo test --locked --lib ci_bundle_commands_route_and_parse_limits
       - name: Build client and engine
         run: cargo build --locked --release --bin kache --bin kache-engine
+      - name: Test automatic bundle lifecycle
+        run: bash scripts/test-ci-bundles.sh target/release/kache
       - name: Package and smoke-test isolated installation
         run: |
           mkdir dist install
-          archive="kache-v2.0.0-rc.2-miden.1-${TARGET}.tar.gz"
+          archive="kache-v2.0.0-rc.2-miden.2-${TARGET}.tar.gz"
           tar -czf "dist/${archive}" -C target/release kache kache-engine
           tar -xzf "dist/${archive}" -C install
           install/kache --version
           install/kache-engine --version
+          install/kache restore-bundle --help
+          install/kache save-bundle --help
           export KACHE_CACHE_DIR="${RUNNER_TEMP}/kache-smoke-cache"
           export KACHE_RUNTIME_DIR="${RUNNER_TEMP}/kache-smoke-run"
           export KACHE_CONFIG="${RUNNER_TEMP}/kache-smoke.toml"

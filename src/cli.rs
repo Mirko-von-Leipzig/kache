@@ -9319,6 +9319,9 @@ pub fn save_manifest(
     }) {
         eprintln!("{warning}");
     }
+    if published {
+        crate::remote_bundle::save_after_manifest(config, manifest_key);
+    }
     Ok(())
 }
 
@@ -9485,7 +9488,7 @@ fn manifest_commit(
         .find(|value| !value.is_empty())
 }
 
-fn manifest_entries_from_events(
+pub(crate) fn manifest_entries_from_events(
     events: &[crate::events::BuildEvent],
     session_id: Option<&str>,
 ) -> Vec<crate::remote::ManifestEntry> {

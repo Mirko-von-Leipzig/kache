@@ -232,6 +232,25 @@ enum Commands {
         namespace: Option<String>,
     },
 
+    /// Publish this job's artifacts and shared predictions as CI bundles
+    #[command(hide = true)]
+    SaveBundle {
+        /// Stable job key, including platform and build configuration
+        #[arg(long)]
+        key: String,
+    },
+
+    /// Warm the local cache from a previously published CI bundle
+    #[command(hide = true)]
+    RestoreBundle {
+        /// Same job key used by save-bundle
+        #[arg(long)]
+        key: String,
+        /// Maximum compressed artifact bytes to download
+        #[arg(long, default_value_t = 10_737_418_240)]
+        max_bytes: u64,
+    },
+
     /// Show the background daemon's status, or start, stop or install it
     #[command(subcommand_required = false, display_order = 40)]
     Daemon {

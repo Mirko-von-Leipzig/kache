@@ -60,6 +60,7 @@ mod probe;
 mod probe_memo;
 mod remote;
 mod remote_backend;
+mod remote_bundle;
 mod remote_layout;
 mod remote_pack;
 mod remote_plan;
@@ -286,6 +287,8 @@ fn command_supports_json(command: &Option<Commands>) -> bool {
         Commands::Purge { .. }
         | Commands::Sync { .. }
         | Commands::SaveManifest { .. }
+        | Commands::SaveBundle { .. }
+        | Commands::RestoreBundle { .. }
         | Commands::Telemetry { .. }
         | Commands::Logout
         | Commands::InstallShims { .. } => false,
@@ -926,6 +929,10 @@ fn run_cli(cli: Cli, readiness: Option<kunobi_daemon::readiness::channel::Notifi
             workspace,
             allow_partial,
         ),
+        Some(Commands::SaveBundle { key }) => remote_bundle::run(&config, &key, None),
+        Some(Commands::RestoreBundle { key, max_bytes }) => {
+            remote_bundle::run(&config, &key, Some(max_bytes))
+        }
         Some(Commands::SaveManifest {
             manifest_key,
             namespace,
@@ -939,19 +946,22 @@ fn run_cli(cli: Cli, readiness: Option<kunobi_daemon::readiness::channel::Notifi
         }) => daemon::run_server(&config, &config_provenance, readiness),
         Some(Commands::Daemon {
             command: Some(DaemonCommands::Start),
-        }) => match daemon::start(&config) {
-            Ok(outcome) => {
-                eprintln!("{}", daemon_start_message(&outcome));
-                if !outcome.is_ready() {
+        }) => {
+            remote_bundle::restore_before_start(&config);
+            match daemon::start(&config) {
+                Ok(outcome) => {
+                    eprintln!("{}", daemon_start_message(&outcome));
+                    if !outcome.is_ready() {
+                        std::process::exit(1);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("failed to start daemon: {e}");
                     std::process::exit(1);
                 }
-                Ok(())
             }
-            Err(e) => {
-                eprintln!("failed to start daemon: {e}");
-                std::process::exit(1);
-            }
-        },
+        }
         Some(Commands::Daemon {
             command: Some(DaemonCommands::Stop),
         }) => daemon::send_shutdown_request(&config),
@@ -2957,6 +2967,27 @@ mod tests {
             );
         }
         assert!(Cli::try_parse_from(["kache", "init", "--shims", "-n"]).is_err());
+    }
+
+    #[test]
+    fn ci_bundle_commands_route_and_parse_limits() {
+        let parsed = Cli::try_parse_from([
+            "kache",
+            "restore-bundle",
+            "--key",
+            "linux-tests",
+            "--max-bytes",
+            "0",
+        ])
+        .unwrap();
+        assert!(
+            matches!(parsed.command, Some(Commands::RestoreBundle { key, max_bytes: 0 }) if key == "linux-tests")
+        );
+        assert!(Cli::try_parse_from(["kache", "save-bundle"]).is_err());
+        assert!(Cli::try_parse_from(["kache", "save-bundle", "--key", "linux-tests"]).is_ok());
+        for command in ["save-bundle", "restore-bundle"] {
+            assert!(kache_client::engine_command_names().contains(&command));
+        }
     }
 
     #[test]

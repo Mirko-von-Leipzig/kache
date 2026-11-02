@@ -496,10 +496,7 @@ impl std::fmt::Display for EntryNotFound {
 
 impl std::error::Error for EntryNotFound {}
 
-// pub(crate) so other modules' tests can build a valid entry pack fixture to
-// drive the remote download-success paths against the mock (sync pull, daemon
-// remote-check HIT, prefetch). Production callers are all within this module.
-#[cfg(test)]
+// Builds the v3 payload used by individual uploads and CI transport bundles.
 pub(crate) fn create_entry_pack_zstd(
     entry_dir: &Path,
     blobs_dir: &Path,
