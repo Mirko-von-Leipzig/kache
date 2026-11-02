@@ -16,6 +16,11 @@ cleanup() {
     rm -rf "${trial_dir}"
 }
 trap cleanup EXIT
+# Isolates the disposable filesystem fixture from the hosting CI's branch policy.
+#
+# This test must publish locally even when its workflow runs on a read-only
+# branch. It never configures an external remote or changes production policy.
+unset GITHUB_ACTIONS GITLAB_CI
 mkdir -p "${trial_dir}/project/src" "${trial_dir}/remote"
 cat > "${KACHE_CONFIG}" <<TOML
 [cache]
