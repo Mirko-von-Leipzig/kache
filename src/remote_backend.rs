@@ -564,7 +564,7 @@ impl RemoteBackend for OpenDalBackend {
         let memory = self.download_memory.acquire(max_bytes).await?;
         let mut body = Vec::new();
         let Some((transfer, etag)) = self
-            .read_into(&self.operator, key, max_bytes, &mut body)
+            .read_into(self.reader(), key, max_bytes, &mut body)
             .await?
         else {
             return Ok(None);
@@ -3367,12 +3367,22 @@ mod tests {
             http_response("404 Not Found", ""),
             http_response("503 Service Unavailable", "<Error><Code>SlowDown</Code></Error>"),
             format!("HTTP/1.1 302 Found\r\nLocation: {origin_url}/key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            http_response("404 Not Found", ""),
+            http_response("503 Service Unavailable", "<Error><Code>SlowDown</Code></Error>"),
         ]).await;
         let backend = cdn_backend(&origin_url, &cdn);
         assert!(backend.get("missing", None).await.unwrap().is_none());
         assert!(backend.get("unavailable", None).await.is_err());
         assert!(backend.get("redirect", None).await.is_err());
-        assert_eq!(requests.await.unwrap().len(), 3);
+        assert!(
+            backend
+                .get_versioned("missing", None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(backend.get_versioned("unavailable", None).await.is_err());
+        assert_eq!(requests.await.unwrap().len(), 5);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), origin.accept())
                 .await
@@ -3433,16 +3443,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cdn_configuration_keeps_writes_and_versioned_reads_on_signed_s3() {
+    async fn cdn_versioned_reads_are_anonymous_and_writes_stay_on_signed_s3() {
         let versioned = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nfresh";
+        let (cdn, cdn_requests) = mock_http_server(vec![versioned.into()]).await;
         let (origin, requests) = mock_http_server(vec![
-            versioned.into(),
             http_response("200 OK", ""),
             http_response("200 OK", ""),
             http_response("200 OK", ""),
         ])
         .await;
-        let backend = cdn_backend(&origin, "http://127.0.0.1:1");
+        let backend = cdn_backend(&origin, &cdn);
         let (object, etag) = backend
             .get_versioned("prs/manifest", None)
             .await
@@ -3469,14 +3479,23 @@ mod tests {
             PutIfAbsentResult::Created
         );
         let requests = requests.await.unwrap();
-        assert!(requests[0].starts_with("GET /cache-bucket/prs/manifest "));
+        let cdn_requests = cdn_requests.await.unwrap();
+        assert!(cdn_requests[0].starts_with("GET /prs/manifest "));
         assert!(
-            requests[1]
+            !cdn_requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization:")
+        );
+        assert!(!cdn_requests[0].contains("writer-"));
+        assert!(!cdn_requests[0].contains("cache-bucket"));
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[0]
                 .to_ascii_lowercase()
                 .contains("if-match: \"v1\"")
         );
         assert!(
-            requests[3]
+            requests[2]
                 .to_ascii_lowercase()
                 .contains("if-none-match: *")
         );

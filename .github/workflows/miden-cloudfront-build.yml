@@ -1,8 +1,8 @@
-name: Build Miden cache bundle trial
+name: Build Miden CloudFront cache
 
 on:
   push:
-    branches: [miden-cloudfront, miden-ci-bundles]
+    branches: [miden-cloudfront, miden-ci-bundles, miden-cloudfront-metadata]
   workflow_dispatch:
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ""
-      KACHE_VERSION: v2.0.0-rc.2-miden.2
+      KACHE_VERSION: v2.0.0-rc.2-miden.3
       CARGO_PROFILE_TEST_DEBUG: "0"
       TARGET: ${{ matrix.target }}
     steps:
@@ -51,7 +51,7 @@ jobs:
       - name: Package and smoke-test isolated installation
         run: |
           mkdir dist install
-          archive="kache-v2.0.0-rc.2-miden.2-${TARGET}.tar.gz"
+          archive="kache-${KACHE_VERSION}-${TARGET}.tar.gz"
           tar -czf "dist/${archive}" -C target/release kache kache-engine
           tar -xzf "dist/${archive}" -C install
           install/kache --version
